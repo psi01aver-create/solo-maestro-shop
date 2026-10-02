@@ -7,6 +7,12 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Prata&family=Onest:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
+<!-- Storefront integration, Уровень 2, Вариант В: the official Telegram
+     WebApp SDK. Without this script, window.Telegram.WebApp (and its
+     initData, which is how the CRM recognizes a partner) never exists,
+     even when this page is opened via a Telegram bot's "web_app" button —
+     Telegram's bridge only shows up once this SDK runs. -->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 :root{
   color-scheme: light;
@@ -232,15 +238,15 @@ const CONFIG = {
   whatsapp: "77000000000",
   // Ваш username в Telegram без @
   telegram: "solo_maestro",
-  // Прямая отправка заявок партнёров в Telegram через бота (работает на своём хостинге, напр. GitHub Pages).
-  // Создайте ОТДЕЛЬНОГО бота у @BotFather, напишите ему /start и впишите токен и ваш chat_id.
-  // Если оставить пустыми — заявка откроется в Telegram готовым текстом, останется нажать «Отправить».
-  telegramBot: { token: "", chatId: "" },
   currency: "₸",
-  // Оптики-партнёры: код входа → название
-  partners: [
-    { code: "DEMO-2026", name: "Оптика «Демо»" },
-  ],
+  // Storefront integration, Уровень 2, Вариант В: the STARLING OPTIC CRM's
+  // own base URL (the Vercel deployment — same value as the CRM's
+  // NEXT_PUBLIC_APP_URL). Partner login (via Telegram) and partner
+  // checkout (posting a cart as a real order) both call this. Left empty
+  // until you fill in the real URL — until then the storefront silently
+  // stays in guest/retail mode for everyone, same as if opened outside
+  // Telegram entirely.
+  crmApiUrl: "",
 };
 
 /* Разделы витрины */
@@ -291,14 +297,15 @@ const PRODUCTS = [
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
-const fmt = n => Math.round(n).toLocaleString("ru-RU").replace(/ /g, " ") + " " + CONFIG.currency;
+const fmt = n => Math.round(n).toLocaleString("ru-RU").replace(/ /g, " ") + " " + CONFIG.currency;
 const store = {
   get(k, d) { try { const v = localStorage.getItem("sm_" + k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem("sm_" + k, JSON.stringify(v)); } catch {} },
 };
 
 let state = {
-  partner: store.get("partner", null),   // {code,name}
+  partner: store.get("partner", null),   // {id, name} — set by Telegram auth, see initPartnerSession()
+  partnerToken: store.get("partnerToken", null), // bearer token from POST /api/storefront/auth
   clientMode: store.get("clientMode", false),
   cart: store.get("cart", []),           // [{code, opt, qty}]
   query: "",
@@ -584,9 +591,10 @@ function openCart() {
   const partner = isPartner(), client = state.partner && state.clientMode;
   const form = client ? `<p class="note">Покажите выбор консультанту: оптика оформит заказ и сообщит о готовности.</p><button class="btn dark" data-close>Готово</button>`
     : partner ? `
-      <label class="field">Комментарий к заявке<textarea id="cNote" placeholder="Например: под заказ клиента Иванова, линзы 1.6 AR"></textarea></label>
-      <button class="btn tg" id="sendTg">${I.tg}Отправить заявку в Telegram</button>
-      <div class="btns"><a class="btn wa" id="sendWa" href="#" target="_blank" rel="noopener">${I.wa}WhatsApp</a><button class="btn ghost" id="copyOrder">Скопировать текст</button></div>`
+      <label class="field">Комментарий к заказу (необязательно)<textarea id="cNote" placeholder="Например: под заказ клиента Иванова, линзы 1.6 AR"></textarea></label>
+      <button class="btn dark" id="sendCrm">Оформить заказ в CRM</button>
+      <span class="err" id="crmErr" hidden></span>
+      <div class="btns"><a class="btn wa" id="sendWa" href="#" target="_blank" rel="noopener">${I.wa}Также в WhatsApp</a><button class="btn ghost" id="copyOrder">Скопировать текст</button></div>`
     : `
       <label class="field">Ваше имя<input id="cName" autocomplete="name" value="${esc(store.get("name",""))}"></label>
       <label class="field">Телефон<input id="cPhone" type="tel" autocomplete="tel" placeholder="+7 7__ ___ __ __" value="${esc(store.get("phone",""))}"></label>
@@ -637,20 +645,46 @@ function openCart() {
   wa?.addEventListener("click", e => { if (partner) { copyText(orderText(note()), null); toast("Откроется WhatsApp с текстом заявки. Нажмите «Отправить»."); } else guard(e); });
   tgl?.addEventListener("click", guard);
   $("#copyOrder", layer)?.addEventListener("click", () => copyText(orderText(note()), "Текст заявки скопирован"));
-  $("#sendTg", layer)?.addEventListener("click", async e => {
-    const t = orderText(note()), btn = e.currentTarget;
-    if (CONFIG.telegramBot.token && CONFIG.telegramBot.chatId) {
-      btn.disabled = true; btn.textContent = "Отправляем…";
-      try {
-        const r = await fetch(`https://api.telegram.org/bot${CONFIG.telegramBot.token}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: CONFIG.telegramBot.chatId, text: t }) });
-        const j = await r.json();
-        if (!j.ok) throw new Error(j.description);
-        toast("Заявка отправлена в Solo Maestro"); state.cart = []; saveCart(); closeLayer(); refreshList(); return;
-      } catch (err) { btn.disabled = false; btn.innerHTML = I.tg + "Отправить заявку в Telegram"; toast("Не удалось отправить напрямую. Открываем Telegram с готовым текстом."); }
+  // Storefront integration, Уровень 2, Вариант В: the partner's primary
+  // checkout action now creates a real CRM order (POST /api/storefront/
+  // orders, bearer-authenticated) instead of only producing a message for
+  // someone to retype into the CRM by hand. WhatsApp/copy-text above stay
+  // as an extra heads-up channel, not the order record itself.
+  $("#sendCrm", layer)?.addEventListener("click", async e => {
+    const btn = e.currentTarget;
+    const errEl = $("#crmErr", layer);
+    if (errEl) errEl.hidden = true;
+    if (!CONFIG.crmApiUrl) {
+      if (errEl) { errEl.hidden = false; errEl.textContent = "Витрина ещё не подключена к CRM — используйте WhatsApp ниже."; }
+      return;
     }
-    copyText(t, null);
-    const a = document.createElement("a"); a.href = `https://t.me/${CONFIG.telegram}?text=${encodeURIComponent(t)}`; a.target = "_blank"; a.rel = "noopener"; document.body.appendChild(a); a.click(); a.remove();
-    toast("Откроется Telegram с текстом заявки. Нажмите «Отправить».");
+    if (!state.partnerToken) {
+      if (errEl) { errEl.hidden = false; errEl.textContent = "Сессия устарела — закройте витрину и откройте её заново из бота."; }
+      return;
+    }
+    btn.disabled = true; btn.textContent = "Оформляем…";
+    try {
+      const items = cartLines().map(l => ({
+        code: l.p.code,
+        name: l.p.name,
+        cat: l.p.cat,
+        ...(l.opt ? { opt: l.opt } : {}),
+        qty: l.qty,
+        unitPrice: unitPrice(l.p),
+      }));
+      const res = await fetch(CONFIG.crmApiUrl.replace(/\/$/, "") + "/api/storefront/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + state.partnerToken },
+        body: JSON.stringify({ items, note: note() }),
+      });
+      if (!res.ok) throw new Error("request failed: " + res.status);
+      const data = await res.json();
+      state.cart = []; saveCart(); closeLayer(); refreshList();
+      toast(`Заказ №${data.order.orderNumber} оформлен в CRM`);
+    } catch (err) {
+      btn.disabled = false; btn.textContent = "Оформить заказ в CRM";
+      if (errEl) { errEl.hidden = false; errEl.textContent = "Не получилось отправить — проверьте связь и попробуйте ещё раз, либо напишите в WhatsApp ниже."; }
+    }
   });
   function keep() { const n = $("#cNote", layer)?.value; openCart(); if (n && $("#cNote", layer)) $("#cNote", layer).value = n; }
 }
@@ -663,49 +697,121 @@ function orderText(note) {
   return `Solo Maestro · ${head}\n\n${rows.join("\n")}\n\nИтого: ${fmt(cartTotal())}${note ? "\nКомментарий: " + note : ""}`;
 }
 
-/* ---------- Вход партнёра ---------- */
-function openLogin(mode) {
-  const exit = mode === "exit";
-  openLayer(`<div class="overlay" data-bg><form class="modal" id="lf" novalidate>
+/* ---------- Партнёр: вход через Telegram, выход из режима клиента ----------
+   Storefront integration, Уровень 2, Вариант В — заменяет прежний вход по
+   общему коду (CONFIG.partners/openLogin()). Партнёр не логинится вручную
+   на этой странице вообще: его узнают по тому же Telegram-аккаунту, что и
+   в самой CRM, как только он открывает витрину из бота (initPartnerSession()
+   ниже). Эти два экрана — только информационные/подтверждающие. */
+function openPartnerInfo() {
+  openLayer(`<div class="overlay" data-bg><div class="modal">
     <button type="button" class="close" data-close aria-label="Закрыть">${I.x}</button>
-    <h2>${exit ? "Выход из режима клиента" : "Вход для оптик-партнёров"}</h2>
-    <p>${exit ? "Введите код партнёра, чтобы снова видеть оптовые цены." : "Введите код партнёра, который вы получили от Solo Maestro. После входа в карточках появятся оптовые цены."}</p>
-    <label class="field">Код партнёра<input id="lcode" autocomplete="off" autocapitalize="characters" required></label>
-    <span class="err" id="lerr" hidden>Код не подошёл. Проверьте написание или напишите нам в Telegram.</span>
-    <button class="btn dark" type="submit">${exit ? "Вернуться к оптовым ценам" : "Войти"}</button>
-    ${exit ? "" : `<p>Хотите стать партнёром? Напишите в <a href="https://t.me/${CONFIG.telegram}" target="_blank" rel="noopener">Telegram @${esc(CONFIG.telegram)}</a>.</p>`}
-  </form></div>`);
+    <h2>Вход для оптик-партнёров</h2>
+    <p>Вход происходит автоматически через Telegram-бота Solo Maestro — без кодов и паролей. Откройте витрину по кнопке в боте под своим аккаунтом, и мы узнаем вас сами.</p>
+    <p>Ещё не партнёр? Напишите нам в <a href="https://t.me/${esc(CONFIG.telegram)}" target="_blank" rel="noopener">Telegram @${esc(CONFIG.telegram)}</a>.</p>
+  </div></div>`);
   layerFromHash = false;
-  $("#lcode").focus();
-  $("[data-close]", layer).onclick = () => closeLayer();
+  layer.querySelectorAll("[data-close]").forEach(b => b.onclick = () => closeLayer());
   $("[data-bg]", layer).onclick = e => { if (e.target.hasAttribute("data-bg")) closeLayer(); };
-  $("#lf").onsubmit = e => {
-    e.preventDefault();
-    const code = $("#lcode").value.trim().toUpperCase();
-    const p = CONFIG.partners.find(x => x.code.toUpperCase() === code);
-    if (!p || (exit && p.code !== state.partner.code)) { $("#lerr").hidden = false; return; }
-    state.partner = { code: p.code, name: p.name }; state.clientMode = false;
-    store.set("partner", state.partner); store.set("clientMode", false);
-    closeLayer(); render(); toast(exit ? "Оптовые цены снова видны" : `Добро пожаловать, ${p.name}`);
-  };
+}
+function confirmExitClientMode() {
+  // There's no shared secret left to ask for (that was the whole point of
+  // moving off the code system) — this confirm step keeps the same
+  // friction the old "re-enter the code" gate had (a deliberate second
+  // tap a customer glancing at the screen wouldn't casually make),
+  // without needing a code the partner would have to remember or guard.
+  openLayer(`<div class="overlay" data-bg><div class="modal">
+    <button type="button" class="close" data-close aria-label="Закрыть">${I.x}</button>
+    <h2>Выход из режима клиента</h2>
+    <p>Подтвердите, что это делает партнёр, а не покупатель, — вернутся оптовые цены.</p>
+    <button class="btn dark" id="exitYes">Да, вернуть оптовые цены</button>
+    <button class="btn ghost" data-close>Отмена</button>
+  </div></div>`);
+  layerFromHash = false;
+  layer.querySelectorAll("[data-close]").forEach(b => b.onclick = () => closeLayer());
+  $("[data-bg]", layer).onclick = e => { if (e.target.hasAttribute("data-bg")) closeLayer(); };
+  $("#exitYes", layer).onclick = () => { state.clientMode = false; store.set("clientMode", false); closeLayer(); render(); toast("Оптовые цены снова видны"); };
 }
 function openAccount() {
   openLayer(`<div class="overlay" data-bg><div class="modal">
     <button type="button" class="close" data-close aria-label="Закрыть">${I.x}</button>
     <h2>${esc(state.partner.name)}</h2>
-    <p>Режим показа клиенту скрывает оптовые цены. Клиент может выбрать модели в корзину, а вы потом оформите заявку по оптовым ценам. Выход из режима только по коду партнёра.</p>
+    <p>Режим показа клиенту скрывает оптовые цены. Клиент может выбрать модели в корзину, а вы потом оформите заказ по оптовым ценам. Выход из режима требует подтверждения прямо на устройстве.</p>
     <button class="btn dark" id="toClient">Показать каталог клиенту</button>
-    <button class="btn ghost" id="logout">Выйти из аккаунта</button>
+    <button class="btn ghost" id="logout">Скрыть оптовые цены на этом устройстве</button>
   </div></div>`);
   layerFromHash = false;
   $("[data-close]", layer).onclick = () => closeLayer();
   $("[data-bg]", layer).onclick = e => { if (e.target.hasAttribute("data-bg")) closeLayer(); };
   $("#toClient").onclick = () => { state.clientMode = true; store.set("clientMode", true); closeLayer(); render(); toast("Режим клиента: видны розничные цены"); };
-  $("#logout").onclick = () => { state.partner = null; state.clientMode = false; store.set("partner", null); store.set("clientMode", false); closeLayer(); render(); };
+  $("#logout").onclick = () => {
+    // Clears the cached partner identity for the rest of this visit only —
+    // there's no separate account to "log out" of any more, since identity
+    // comes from Telegram itself. Reopening the storefront from the bot
+    // re-authenticates automatically (see initPartnerSession()).
+    state.partner = null; state.partnerToken = null; state.clientMode = false;
+    store.set("partner", null); store.set("partnerToken", null); store.set("clientMode", false);
+    closeLayer(); render();
+  };
 }
-$("#who").onclick = () => { if (!state.partner) openLogin(); else if (state.clientMode) openLogin("exit"); else openAccount(); };
-$("#exitClient").onclick = () => openLogin("exit");
+$("#who").onclick = () => { if (!state.partner) openPartnerInfo(); else if (state.clientMode) confirmExitClientMode(); else openAccount(); };
+$("#exitClient").onclick = () => confirmExitClientMode();
 $("#cartBtn").onclick = () => { clearAsk = false; openCart(); };
+
+/* ---------- Вход партнёра через Telegram ----------
+   Storefront integration, Уровень 2, Вариант В. Runs once on load, before
+   the first render(): if this page was opened from the bot's "Открыть
+   витрину" button (see bot/handlers/start.ts in the CRM repo), the
+   Telegram WebApp SDK (loaded in <head>) exposes window.Telegram.WebApp
+   with a signed initData string — the same kind of proof the CRM itself
+   already uses to log staff and partners in. Posting it to the CRM's
+   /api/storefront/auth is how this separate, static page gets to ask
+   "is this Telegram account an approved partner?" without ever holding a
+   password or shared code of its own. */
+async function initPartnerSession() {
+  // A partner cached from the old shared-code login (before this change)
+  // has no token and can't be trusted for checkout — drop it rather than
+  // show wholesale prices no one can actually act on.
+  if (state.partner && !state.partnerToken) {
+    state.partner = null; state.clientMode = false;
+    store.set("partner", null); store.set("clientMode", false); store.set("partnerToken", null);
+  }
+
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (!tg || !tg.initData) return; // opened in an ordinary browser — guest/retail mode, unchanged
+
+  try { tg.ready(); tg.expand(); } catch {}
+
+  if (!CONFIG.crmApiUrl) return; // CRM URL not filled in yet — see CONFIG comment
+
+  try {
+    const res = await fetch(CONFIG.crmApiUrl.replace(/\/$/, "") + "/api/storefront/auth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: tg.initData }),
+    });
+    if (!res.ok) {
+      // Not an approved partner's Telegram account (not linked at all,
+      // or still awaiting the optic's approval) — fail safe to
+      // guest/retail, exactly as if opened outside Telegram entirely.
+      state.partner = null; state.partnerToken = null; state.clientMode = false;
+      store.set("partner", null); store.set("partnerToken", null); store.set("clientMode", false);
+      return;
+    }
+    const data = await res.json();
+    const partnerName = data.partner.opticName
+      || [data.partner.firstName, data.partner.lastName].filter(Boolean).join(" ")
+      || "Партнёр";
+    state.partner = { id: data.partner.id, name: partnerName };
+    state.partnerToken = data.token;
+    store.set("partner", state.partner);
+    store.set("partnerToken", state.partnerToken);
+  } catch (err) {
+    // Network error reaching the CRM — never leave wholesale pricing on
+    // screen backed by a session that couldn't actually be verified.
+    state.partner = null; state.partnerToken = null; state.clientMode = false;
+  }
+}
 
 /* ---------- Мелочи ---------- */
 let tt;
@@ -716,7 +822,7 @@ function copyText(text, msg) {
 }
 $("#footContacts").innerHTML = `WhatsApp +${esc(CONFIG.whatsapp)} · Telegram @${esc(CONFIG.telegram)}`;
 window.addEventListener("hashchange", render);
-render();
+initPartnerSession().finally(render);
 </script>
 
 </body>
