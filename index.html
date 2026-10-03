@@ -778,11 +778,22 @@ async function initPartnerSession() {
   }
 
   const tg = window.Telegram && window.Telegram.WebApp;
-  if (!tg || !tg.initData) return; // opened in an ordinary browser — guest/retail mode, unchanged
+  if (!tg || !tg.initData) {
+    // TEMPORARY DIAGNOSTIC (Алексей, remove this alert() once the
+    // storefront-to-CRM connection is confirmed working — see the chat
+    // for instructions): shows exactly why no partner session started,
+    // instead of silently falling back to guest/retail like the final
+    // version does.
+    alert("ДИАГНОСТИКА: не похоже, что страница открыта как Telegram WebApp.\ntg найден: " + !!tg + "\ninitData: " + JSON.stringify(tg && tg.initData));
+    return; // opened in an ordinary browser — guest/retail mode, unchanged
+  }
 
   try { tg.ready(); tg.expand(); } catch {}
 
-  if (!CONFIG.crmApiUrl) return; // CRM URL not filled in yet — see CONFIG comment
+  if (!CONFIG.crmApiUrl) {
+    alert("ДИАГНОСТИКА: CONFIG.crmApiUrl пустой в коде витрины.");
+    return; // CRM URL not filled in yet — see CONFIG comment
+  }
 
   try {
     const res = await fetch(CONFIG.crmApiUrl.replace(/\/$/, "") + "/api/storefront/auth", {
@@ -791,6 +802,9 @@ async function initPartnerSession() {
       body: JSON.stringify({ initData: tg.initData }),
     });
     if (!res.ok) {
+      let bodyText = "";
+      try { bodyText = await res.text(); } catch {}
+      alert("ДИАГНОСТИКА: CRM ответил с ошибкой.\nСтатус: " + res.status + " " + res.statusText + "\nТело ответа: " + bodyText);
       // Not an approved partner's Telegram account (not linked at all,
       // or still awaiting the optic's approval) — fail safe to
       // guest/retail, exactly as if opened outside Telegram entirely.
@@ -806,7 +820,9 @@ async function initPartnerSession() {
     state.partnerToken = data.token;
     store.set("partner", state.partner);
     store.set("partnerToken", state.partnerToken);
+    alert("ДИАГНОСТИКА: успех! Партнёр: " + partnerName);
   } catch (err) {
+    alert("ДИАГНОСТИКА: запрос к CRM не прошёл (сетевая ошибка/CORS).\n" + (err && err.message ? err.message : String(err)));
     // Network error reaching the CRM — never leave wholesale pricing on
     // screen backed by a session that couldn't actually be verified.
     state.partner = null; state.partnerToken = null; state.clientMode = false;
