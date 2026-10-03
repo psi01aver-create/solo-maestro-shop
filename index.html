@@ -784,7 +784,16 @@ async function initPartnerSession() {
     // for instructions): shows exactly why no partner session started,
     // instead of silently falling back to guest/retail like the final
     // version does.
-    alert("ДИАГНОСТИКА: не похоже, что страница открыта как Telegram WebApp.\ntg найден: " + !!tg + "\ninitData: " + JSON.stringify(tg && tg.initData));
+    alert(
+      "ДИАГНОСТИКА: не похоже, что страница открыта как Telegram WebApp.\n" +
+      "tg найден: " + !!tg + "\n" +
+      "initData: " + JSON.stringify(tg && tg.initData) + "\n" +
+      "platform: " + (tg && tg.platform) + "\n" +
+      "version: " + (tg && tg.version) + "\n" +
+      "initDataUnsafe: " + JSON.stringify(tg && tg.initDataUnsafe) + "\n" +
+      "location.href: " + window.location.href + "\n" +
+      "location.hash: " + JSON.stringify(window.location.hash)
+    );
     return; // opened in an ordinary browser — guest/retail mode, unchanged
   }
 
