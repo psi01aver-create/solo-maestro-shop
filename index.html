@@ -768,6 +768,41 @@ $("#cartBtn").onclick = () => { clearAsk = false; openCart(); };
    /api/storefront/auth is how this separate, static page gets to ask
    "is this Telegram account an approved partner?" without ever holding a
    password or shared code of its own. */
+/* "Deep link" convenience (Уровень 2, Вариант В follow-up): a partner
+   already signed into the CRM itself can jump here via the "Открыть
+   витрину →" link on its "Новый заказ" page. That link is an ordinary
+   <a href>, and a Telegram Mini App can't hand its own session to another
+   Mini App through one — so without this, that path always fell back to
+   guest/retail, even for an already-logged-in partner (window.Telegram.
+   WebApp.initData stays empty there, same as opening this page outside
+   Telegram entirely). The CRM instead mints a short-lived partner token
+   itself (see app/api/storefront/link-token/route.ts) and appends it to
+   the link as ?ptoken=...&pid=...&pname=... — read it here before ever
+   looking at Telegram's own WebApp data. */
+function consumeUrlToken() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const ptoken = params.get("ptoken");
+    if (!ptoken) return false;
+
+    state.partner = { id: params.get("pid") || "", name: params.get("pname") || "Партнёр" };
+    state.partnerToken = ptoken;
+    store.set("partner", state.partner);
+    store.set("partnerToken", state.partnerToken);
+
+    // Scrub the token from the visible address bar / browser history once
+    // it's been read — it's done its job, and it has no reason to linger
+    // somewhere it could be re-shared or bookmarked.
+    params.delete("ptoken"); params.delete("pid"); params.delete("pname");
+    const rest = params.toString();
+    const clean = window.location.pathname + (rest ? "?" + rest : "") + window.location.hash;
+    window.history.replaceState({}, "", clean);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function initPartnerSession() {
   // A partner cached from the old shared-code login (before this change)
   // has no token and can't be trusted for checkout — drop it rather than
@@ -776,6 +811,8 @@ async function initPartnerSession() {
     state.partner = null; state.clientMode = false;
     store.set("partner", null); store.set("clientMode", false); store.set("partnerToken", null);
   }
+
+  if (consumeUrlToken()) return;
 
   const tg = window.Telegram && window.Telegram.WebApp;
   if (!tg || !tg.initData) {
